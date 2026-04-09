@@ -9,10 +9,10 @@ Answer questions using the brain's knowledge with 3-layer search and synthesis.
    - Semantic query for conceptual questions
    - Structured queries (list by type, backlinks) for relational questions
 2. **Execute searches:**
-   - `gbrain search <keywords>` for FTS matches
-   - `gbrain query <question>` for hybrid semantic+keyword with expansion
-   - `gbrain list --type <type>` or `gbrain backlinks <slug>` for structural queries
-3. **Read top results.** `gbrain get <slug>` for the top 3-5 pages to get full context.
+   - Keyword search gbrain for FTS matches (search)
+   - Hybrid search gbrain for semantic+keyword with expansion (query)
+   - List pages in gbrain by type or check backlinks for structural queries
+3. **Read top results.** Read the top 3-5 pages from gbrain to get full context.
 4. **Synthesize answer** with citations. Every claim traces back to a specific page slug.
 5. **Flag gaps.** If the brain doesn't have info, say "the brain doesn't have information on X" rather than hallucinating.
 
@@ -25,14 +25,12 @@ Answer questions using the brain's knowledge with 3-layer search and synthesis.
 - For "what happened" questions, use timeline entries
 - For "what do we know" questions, read compiled_truth directly
 
-## Commands Used
+## Tools Used
 
-```
-gbrain search <query>
-gbrain query <question>
-gbrain get <slug>
-gbrain list [--type T] [--tag T]
-gbrain backlinks <slug>
-gbrain graph <slug> [--depth N]
-gbrain timeline <slug>
-```
+- Keyword search gbrain (search)
+- Hybrid search gbrain (query)
+- Read a page from gbrain (get_page)
+- List pages in gbrain with filters (list_pages)
+- Check backlinks in gbrain (get_backlinks)
+- Traverse the link graph in gbrain (traverse_graph)
+- View timeline entries in gbrain (get_timeline)
