@@ -39,11 +39,15 @@ Your markdown repo is the source of truth. GBrain makes it searchable. Your AI a
 
 ## Why this exists
 
-You have a brain full of knowledge. It lives in markdown files, meeting notes, CRM exports, Obsidian vaults, Notion databases. It's scattered, unsearchable, and going stale.
+Andrej Karpathy's [LLM OS / Knowledge LLM](https://x.com/karpathy/status/1723140519554105733) post sketched the vision: a personal wiki maintained by AI agents, where every page is a living document that gets smarter as the agent processes more information. I started building exactly that. Markdown files in a git repo, one page per entity, compiled truth on top, append-only timeline on the bottom.
 
-Search is the bottleneck. Keyword search misses semantic matches. Vector search misses exact names and phrases. Neither connects related ideas across documents.
+It worked. Until I hit thousands of files.
 
-GBrain fixes this with hybrid search that combines both approaches, plus a knowledge model that treats every page like an intelligence assessment: compiled truth on top (your current best understanding, rewritten when evidence changes), append-only timeline on the bottom (the evidence trail that never gets edited).
+At 500 files, `grep` is fine. At 3,000 people pages, 5,800 Apple Notes, and 13 years of calendar data, `grep` falls apart. You need real search: keyword for exact names, vector for semantic meaning, and something that fuses both. You need an index that updates incrementally when one file changes, not a full directory walk. You need your agent to find "everyone who was at the board dinner last March" in milliseconds, not 30 seconds of grepping.
+
+That's what GBrain is. The search and sync layer I had to build once the brain outgrew `grep`.
+
+GBrain fixes this with hybrid search that combines keyword and vector approaches, plus a knowledge model that treats every page like an intelligence assessment: compiled truth on top (your current best understanding, rewritten when evidence changes), append-only timeline on the bottom (the evidence trail that never gets edited).
 
 AI agents maintain the brain. You ingest a document and the agent updates every entity mentioned, creates cross-reference links, and appends timeline entries. MCP clients query it. The intelligence lives in fat markdown skills, not application code.
 
