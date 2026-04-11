@@ -1,7 +1,7 @@
 ---
 id: twilio-voice-brain
 name: Voice-to-Brain
-version: 0.7.0
+version: 0.8.0
 description: Phone calls create brain pages via Twilio + OpenAI Realtime + GBrain MCP. Callers talk, brain pages appear.
 category: sense
 requires: [ngrok-tunnel]
@@ -230,7 +230,7 @@ If using free tier, copy the URL from the ngrok output (changes every restart).
 Note: ngrok runs in the foreground. Run it in a background process or new terminal tab.
 
 The same ngrok account can also serve your GBrain MCP server (see
-[ngrok Setup](docs/mcp/NGROK_SETUP.md) for the full multi-service pattern).
+[ngrok-tunnel recipe](recipes/ngrok-tunnel.md) for the full multi-service pattern).
 
 ### Step 4: Create Voice Server
 
@@ -286,18 +286,23 @@ The voice server needs these components in `server.mjs`:
    ```
    POST /session:
      sdp = request.body  // caller's SDP offer
-     form = new FormData()
-     form.append('sdp', sdp)
-     form.append('session', JSON.stringify({
+
+     sessionConfig = JSON.stringify({
        type: 'realtime',
        model: 'gpt-4o-realtime-preview',
-       audio: {output: {voice: VOICE}},
-       instructions: buildPrompt(null)
-     }))
+       audio: { output: { voice: VOICE } },
+       instructions: buildPrompt(null),
+       tools: TOOL_SETS.unauthenticated,
+     })
+
+     // Use native FormData (Node 18+) — NOT manual multipart
+     fd = new FormData()
+     fd.set('sdp', sdp)
+     fd.set('session', sessionConfig)
 
      response = POST 'https://api.openai.com/v1/realtime/calls'
        Authorization: Bearer OPENAI_API_KEY
-       body: form
+       body: fd   // fetch() sets Content-Type automatically
 
      return response.text()  // SDP answer
    ```
@@ -306,6 +311,8 @@ The voice server needs these components in `server.mjs`:
    - `voice` goes under `audio.output.voice`, not top-level
    - Do NOT send `turn_detection` in session config (not accepted by `/v1/realtime/calls`)
    - Do NOT send `session.update` on connect (server already configured it)
+   - All `session.update` calls must include `type: 'realtime'` to avoid session.type errors
+   - `input_audio_transcription` is NOT supported over WebRTC data channel — use Whisper post-call on recorded audio instead
    - Trigger greeting via data channel after WebRTC connects
 
 **Reference implementation:** The architecture above and the OpenAI Realtime API
@@ -464,3 +471,198 @@ The watchdog restarts the server if it crashes."
 - Free ngrok URLs change every time ngrok restarts
 - The watchdog (Step 9) handles this automatically
 - For a permanent URL: upgrade to ngrok paid ($8/mo) for a static domain, or deploy to Fly.io/Railway instead
+
+## Production Patterns (Recommended)
+
+These patterns come from a production voice deployment handling real calls daily.
+They are NOT required for basic setup. **Implement them AFTER the smoke test passes.**
+Each pattern is self-contained and optional.
+
+### Agent Identity & Engagement
+
+#### Identity Separation
+**Problem:** A voice agent pretending to be the full AI system creates uncanny valley.
+**Pattern:** The voice agent picks its own name and personality, distinct from the main
+AI brain. "I work with [Brain], [Owner]'s AI." Lighter, more playful, more curious.
+
+#### Pre-Computed Bid System
+**Problem:** Dead air kills engagement. Voice agents wait passively.
+**Pattern:** At call start, scan live context and pre-compute up to 10 engagement bids.
+Two types: informative (tasks, calendar, social radar) and relational (curiosity templates).
+Bids go INTO the prompt so the agent picks from a list. Use bids #1 and #2 for greeting,
+cycle the rest during conversation. Never ask "anything else?" — bring up the next bid.
+
+#### Context-First Prompt
+**Problem:** Voice agent greets generically because it doesn't know what's happening today.
+**Pattern:** Load live context at call start: tasks, calendar, location, social radar,
+morning briefing. Position context FIRST in the prompt (before rules) so the model sees
+it immediately and uses it in the greeting. Try/catch per section. Cap 500-1000 chars each.
+
+#### Proactive Advisor Mode
+**Problem:** Voice agents are reactive task machines.
+**Pattern:** The agent drives the conversation. Anticipate decisions on stale tasks.
+Suggest capitalizing on trending items. Connect upcoming events with brain context.
+"Dead air is your enemy" — fill every pause. Never wait passively.
+
+#### Conversation Timing (the #1 fix)
+**Problem:** Voice agents interrupt mid-thought AND go silent when the caller is done.
+Both feel terrible. Early "fill every pause" instructions cause the agent to talk over
+the caller while they're thinking.
+**Pattern:** Replace blanket "never be silent" with nuanced timing rules:
+- **Caller talking or thinking:** SHUT UP. Even 3-5 second pauses mid-thought, wait.
+  Incomplete sentence or mid-story = still thinking. Do not interrupt.
+- **Caller done** (complete thought + 2-3 seconds silence): NOW respond. Use a bid,
+  ask a follow-up, or pivot to the next topic.
+- **Detection heuristic:** Incomplete sentence = still thinking. Complete statement +
+  silence = done. Question directed at you = respond immediately.
+- **Hard rule:** Never let silence go past 5 seconds after a COMPLETE thought.
+
+Add this as a labeled section in the system prompt (e.g., `# CRITICAL: Conversation Timing`)
+positioned prominently so the model sees it early. This came from real usage feedback
+and is the single highest-impact voice quality improvement.
+
+#### No Repetition Rule
+**Problem:** Voice agent cycles back to the same bid multiple times in a call.
+**Pattern:** Add to the system prompt: "Do NOT repeat yourself. If you already said
+something, move to the NEXT bid. Vary your responses." Simple but addresses a real
+annoyance that compounds over longer calls.
+
+### Prompt Engineering
+
+#### Radical Prompt Compression
+**Problem:** Long system prompts increase latency and cost on every turn.
+**Pattern:** Compress aggressively. Production went 13K to 4.7K tokens (65% cut).
+Bullets over prose, cut repetition, behavior-first. Every token costs latency + money.
+
+#### OpenAI Realtime Prompting Guide Structure
+**Problem:** Prose paragraphs parse slowly for the model.
+**Pattern:** Use labeled markdown sections: `# Role & Objective`, `# Personality & Tone`,
+`# Rules`, `# Conversation Flow` with state machine substates (`## State 1: VERIFY`,
+`## State 2: GREETING`, `## State 3: CONVERSATION`), `# Trust`.
+
+#### Auth-Before-Speech
+**Problem:** Auth flow adds dead air at call start.
+**Pattern:** Call the auth tool BEFORE speaking any greeting. Then speak "Hey, code's on
+its way." Shaves seconds off the round-trip.
+
+#### Brain Escalation
+**Problem:** Voice agent can't answer complex questions that need the full brain.
+**Pattern:** If caller says "talk to [Brain]" or asks a deep question, immediately route
+to main AI via gateway tool with verbal bridge: "one sec, checking with [Brain]."
+
+### Call Reliability
+
+#### Stuck Watchdog
+**Problem:** Calls go silent when VAD stalls or tool execution hangs.
+**Pattern:** 20-second timer. If no audio out: clear input buffer, inject "you still
+there?" system message, force `response.create`.
+
+#### Never Hang Up
+**Problem:** AI agents try to end calls.
+**Pattern:** Hard prompt rule: only the caller decides when the call ends. Never say
+goodbye, "I'll let you go," or wrap-up language. If silence, ask "you still there?"
+
+#### Thinking Sound
+**Problem:** Dead air during slow tool execution.
+**Pattern:** Pre-generate g711_ulaw audio chunks in a JSON array. Loop at 20ms intervals
+during slow tools (brain search, web lookup). Stop when tool result returns.
+
+#### Fallback TwiML
+**Problem:** Voice agent crashes, callers get silence.
+**Pattern:** `/fallback` endpoint returns TwiML forwarding to owner's cell. Configure as
+Twilio fallback URL.
+
+### Authentication & Authorization
+
+#### Tool Set Architecture
+**Problem:** Unauthenticated callers accessing write operations.
+**Pattern:** Four sets: READ_TOOLS (all callers), WRITE_TOOLS (owner), SCOPED_WRITE_TOOLS
+(trusted users), GATEWAY_TOOLS (authenticated). LLM doesn't see write tools until auth
+succeeds. Upgrade via `session.update` with new tools array. All `session.update` calls
+must include `type: 'realtime'`.
+
+#### Trusted User Auth with Callback
+**Problem:** People other than the owner need authenticated access.
+**Pattern:** Phone registry + callback verification. Each user gets a scope: full,
+household, content, operational. Scope determines which tools they access.
+
+#### Caller Routing
+**Problem:** Different callers need different experiences.
+**Pattern:** `buildPrompt(callerPhone)` returns different system prompts: owner (OTP),
+trusted (callback), inner circle (warm greeting + transfer), known (greeting, message),
+unknown (screen + message).
+
+### Voice Quality
+
+#### Dynamic VAD / Noise Mode
+**Problem:** Background noise causes false triggers or missed speech.
+**Pattern:** `set_noise_mode` tool adjusts VAD threshold mid-call. Presets: quiet (0.7),
+normal (0.85), noisy (0.95), very_noisy (0.98). Agent calls proactively on noise.
+
+#### On-Screen Debug UI
+**Problem:** console.log is useless when testing from a phone.
+**Pattern:** WebRTC client displays tool calls, results, errors, and key events inline.
+
+### Real-Time Awareness
+
+#### Live Moment Capture
+**Problem:** Important things said during a call are lost if the call drops or the
+post-call summary tool doesn't fire.
+**Pattern:** When the caller shares something important (feedback, ideas, personal
+stories, decisions), log it in real-time using a `log_voice_request` tool. Don't
+wait until the call ends. Tell the caller: "Got that, sending it to [Brain] now."
+Also stream key moments to [messaging platform] during the call so the main agent
+has awareness before the call is over.
+
+#### Belt-and-Suspenders Post-Call
+**Problem:** Post-call processing depends on the voice agent remembering to call the
+`post_call_summary` tool. If the call drops or the agent forgets, the call is lost.
+**Pattern:** Both the tool-based AND the automatic call-end handler should post
+structured signals. The call-end handler (fires on WebSocket close or `/call-end`)
+should post to [messaging platform] with:
+- Audio file path
+- Transcript file path (or warning if missing)
+- Tools used during the call
+- Explicit instruction: "[Brain]: Read the call, summarize, take action."
+
+This ensures every call gets processed regardless of whether the voice agent
+remembered to call the summary tool. Belt and suspenders.
+
+### Post-Call Processing
+
+#### Mandatory 3-Step Post-Call
+**Problem:** Main agent doesn't know a call happened.
+**Pattern:** Every call ends with three steps:
+1. **Messaging notification** — summary to [messaging platform]
+2. **Transcript to brain** — `brain/meetings/YYYY-MM-DD-call-{caller}.md`
+3. **Audio to storage** — Twilio MP3 or WebRTC webm/opus, uploaded to cloud storage
+
+#### WebRTC Audio + Transcript Parity
+**Problem:** WebRTC calls don't go through Twilio, no automatic logging.
+**Pattern:** Client captures audio (MediaRecorder, webm/opus) and transcript (per-turn
+POST to `/transcript`). On call end, POST to `/call-end` saves JSON log. Both channels
+produce identical output formats. Note: `input_audio_transcription` is NOT supported
+over WebRTC data channel — use Whisper post-call instead.
+
+#### Dual API Event Handling
+**Problem:** OpenAI Realtime API changed event names.
+**Pattern:** Handle both `response.audio.delta` (old) and `response.output_audio.delta`
+(new). Same for `.done` events. Future-proofs against API changes.
+
+### Brain Query Optimization
+
+#### Report-Aware Query Routing
+**Problem:** Voice queries about specific topics trigger slow vector searches.
+**Pattern:** Check the question against a keyword map BEFORE full brain search:
+
+| Keyword | Report Loaded |
+|---------|--------------|
+| email, inbox, mail | inbox sweep report |
+| social, twitter, mentions | social radar report |
+| briefing, morning | morning briefing |
+| meeting | meeting sync report |
+| slack | slack scan report |
+| content, ideas | content ideas report |
+
+Load up to 2,500 chars of matching report. Break after first match. Fall back to full
+brain search if no keyword matches.
