@@ -71,12 +71,11 @@ Never do anything twice. If you look someone up once, that lookup lives in the b
 
 Your brain gets new senses as they're built. Run `gbrain integrations` to see what's available.
 
-| Integration | Category | What It Does |
-|-------------|----------|-------------|
+| Recipe | Category | What It Does |
+|--------|----------|-------------|
 | [Voice-to-Brain](recipes/twilio-voice-brain.md) | Sense | Phone calls create brain pages via Twilio + OpenAI Realtime |
-| Email-to-Brain | Sense | Gmail messages flow into entity pages *(coming soon)* |
-| X-to-Brain | Sense | Twitter monitoring with entity detection *(coming soon)* |
-| Calendar-to-Brain | Sense | Google Calendar events become meeting prep *(coming soon)* |
+
+More senses shipping with each release. Run `gbrain integrations` to see what's available and `gbrain check-update` to get notified when new recipes drop.
 
 Your agent sets up each integration for you. It reads the recipe, asks for API keys, validates each one, and runs a smoke test. [Markdown is code](docs/ethos/THIN_HARNESS_FAT_SKILLS.md) — the recipe IS the installer.
 
@@ -208,66 +207,112 @@ Without an OpenAI key, search still works (keyword only, no vector search). With
 
 ### With OpenClaw or Hermes Agent (recommended)
 
-To install, paste this into [OpenClaw](https://openclaw.ai) or [Hermes Agent](https://github.com/NousResearch/hermes-agent) and we'll work with you to do the rest:
+Paste this block into [OpenClaw](https://openclaw.ai) or [Hermes Agent](https://github.com/NousResearch/hermes-agent). The agent will install GBrain, set up your database, import your files, and verify everything works.
 
 ```
-Set up gbrain (https://github.com/garrytan/gbrain) as my
-knowledge brain.
+GOAL: Install GBrain as my personal knowledge brain. When done, I should
+be able to search my own markdown files with hybrid search (keyword + vector).
 
-1. Make sure bun is installed:
-   curl -fsSL https://bun.sh/install | bash
-   Then run: bun add github:garrytan/gbrain
+YOU MUST COMPLETE EVERY STEP BELOW. Do not skip steps. Do not reorder.
+Each step depends on the previous one. After each step, verify it worked
+before proceeding. If a step fails, stop and fix it. Do not continue
+past a failed step.
 
-2. Run: gbrain init --supabase
-   (follow the wizard to connect my Supabase database)
+STEP 1 — INSTALL GBRAIN
+Run these commands:
+  curl -fsSL https://bun.sh/install | bash
+  source ~/.bashrc
+  bun add github:garrytan/gbrain
+Verify: run `gbrain --version`. You must see a version number.
+If it fails: check that bun is in your PATH.
 
-3. Scan ~/git/ and ~/Documents/ for markdown repos,
-   pick the best one, and run: gbrain import <path> --no-embed
+STEP 2 — CONNECT DATABASE
+Run: gbrain init --supabase
+This starts a wizard. You will need the user's Supabase connection string.
+Tell the user:
+  "I need your Supabase Shared Pooler connection string. Here's how to find it:
+   1. Go to https://supabase.com and open your project
+   2. Click 'Get Connected' next to the project URL
+   3. Select 'Direct Connection String' then 'Session Pooler'
+   4. Copy the 'Shared Pooler' connection string
+   5. Paste it here"
+IMPORTANT: Do NOT ask for the anon key or project URL. Those are wrong.
+The connection string starts with postgresql:// and includes port 6543.
+Verify: run `gbrain doctor --json`. ALL checks must pass.
+If doctor fails: check the connection string, make sure pgvector extension
+exists (gbrain init creates it automatically).
 
-4. Run a query against the imported data to prove search works
+STEP 3 — FIND AND IMPORT MARKDOWN
+Search these directories for markdown files:
+  find ~/git ~/Documents ~/notes ~/brain -maxdepth 3 -name "*.md" 2>/dev/null | head -30
+Pick the directory with the most markdown files. Tell the user which
+directory you found and how many files it contains. Ask: "Found N markdown
+files in /path/. Import these into your brain?"
+If user confirms: run `gbrain import /path/ --no-embed`
+Verify: run `gbrain stats`. Page count must be > 0.
 
-5. Read docs/GBRAIN_RECOMMENDED_SCHEMA.md and offer to
-   restructure my knowledge base
+STEP 4 — PROVE SEARCH WORKS
+Run a keyword search using content from the imported files:
+  gbrain search "a relevant term from the imported content"
+You must get at least 1 result. Show the user the result.
+If 0 results: the import failed. Run `gbrain stats` to check page count.
 
-6. Read docs/GBRAIN_SKILLPACK.md and update all your skills
-   with the production agent patterns: brain-agent loop,
-   entity detection, source attribution, iron law back-linking,
-   and the enrichment pipeline
+STEP 5 — START EMBEDDINGS
+Run: gbrain embed --stale
+This generates vector embeddings for semantic search. It takes 1-2 minutes
+per 1000 pages. Tell the user: "Generating embeddings for semantic search.
+This takes about [estimated time]. Keyword search already works."
+Verify: run `gbrain stats`. Embedded count must equal chunk count.
 
-7. Set up a daily cron for `gbrain check-update`.
-   Notify me on new features only, not patches.
-   Never auto-install, just tell me what's new.
+STEP 6 — PROVE HYBRID SEARCH WORKS
+Run a semantic query (meaning-based, not keyword match):
+  gbrain query "what are the key themes across these documents?"
+You must get results that show vector + keyword fusion working.
+Show the user. This is the magic moment.
 
-8. Set up automatic sync so the vector DB stays current
-   with the brain repo. Read GBRAIN_SKILLPACK.md Section 18
-   for approaches (cron, --watch, webhook). Pick what fits
-   your environment. Always chain:
-   gbrain sync --repo <path> && gbrain embed --stale
-   Verify: push a change, confirm it appears in search.
+STEP 7 — LOAD THE SKILLPACK
+Read docs/GBRAIN_SKILLPACK.md. This is your operational playbook.
+Adopt these patterns into your behavior immediately:
+  - Brain-first lookup: ALWAYS search the brain before answering questions
+  - Entity detection: detect people, companies, concepts in every message
+  - Source attribution: cite brain pages when using brain knowledge
+  - Iron law of back-linking: every entity mention gets a back-link
+  - Compiled truth: rewrite the synthesis, never the timeline
+Read the individual guides in docs/guides/ for detailed instructions
+on each pattern.
 
-9. Run the verification runbook (docs/GBRAIN_VERIFY.md)
-   to confirm everything works: schema, sync, embeddings,
-   brain-first lookup.
+STEP 8 — SET UP LIVE SYNC
+The brain must stay current with the markdown repo. Set up sync:
+  gbrain sync --repo /path/to/brain/ && gbrain embed --stale
+Read docs/guides/live-sync.md for approach options (cron, --watch, webhook).
+Pick whichever fits your environment. Verify: edit a markdown file in the
+repo, run sync, search for the change. The updated content must appear.
+
+STEP 9 — SET UP AUTO-UPDATE
+Run: gbrain check-update --json
+Set up a daily cron or scheduled check. When new versions are available,
+tell the user what's new and ask if they want to upgrade.
+IMPORTANT: Never auto-install updates. Always ask first.
+
+STEP 10 — CHECK AVAILABLE INTEGRATIONS
+Run: gbrain integrations
+Show the user what senses (data inputs) are available. If they want
+any integration (voice-to-brain, email, etc.), run:
+  gbrain integrations show <id>
+and follow the recipe step by step.
+
+STEP 11 — VERIFY EVERYTHING
+Run the verification runbook: read docs/GBRAIN_VERIFY.md
+Execute every check. All must pass. Report results to the user.
+If any check fails, fix it before declaring setup complete.
+
+DONE. Tell the user:
+  "GBrain is set up. You have [N] pages indexed with hybrid search.
+   I will check the brain before answering questions about people,
+   companies, or topics in your knowledge base. Your brain stays
+   current via live sync. Run 'gbrain integrations' to add new
+   senses like voice calls, email, or calendar."
 ```
-
-OpenClaw will install gbrain, walk through Supabase setup, discover your markdown files, import them, and prove search works with a query from your data.
-
-After setup, you talk to your brain through OpenClaw:
-
-```
-Search the brain for everything we know about [topic]
-Ingest my meeting notes from today
-Give me a briefing for my meetings tomorrow
-How many pages are in the brain now?
-```
-
-GBrain keeps your brain current. After setup, `gbrain sync --watch` polls your git repo and imports only what changed. Binary files (images, PDFs, audio) can be moved to cloud storage with `gbrain files mirror` to slim down your git repo.
-
-> **Supabase settings:** GBrain connects directly to Postgres (not the REST API).
-> You need the **Shared Pooler connection string**, not the project URL or anon key.
-> Find it: go to your project, click **Get Connected** next to the project URL,
-> then **Direct Connection String** > **Session Pooler**, and copy the
-> **Shared Pooler** connection string.
 
 ### GBrain without OpenClaw
 
@@ -333,18 +378,31 @@ Per-client setup guides: [`docs/mcp/`](docs/mcp/DEPLOY.md)
 
 ChatGPT support requires OAuth 2.1 and is coming in v0.7. Self-hosted alternatives (Tailscale Funnel, ngrok) documented in [`docs/mcp/ALTERNATIVES.md`](docs/mcp/ALTERNATIVES.md).
 
-**The tools are not enough.** Your agent also needs the playbook: read [GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md) and paste the relevant sections into your agent's system prompt or project instructions. The skillpack tells the agent WHEN and HOW to use each tool: read before responding, write after learning, detect entities on every message, back-link everything.
+**The tools are not enough.** Your agent needs the playbook. Read [GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md) and load the relevant skills into your agent's system prompt. The skillpack tells the agent WHEN to read, WHEN to write, HOW to enrich, and HOW to keep the brain alive autonomously.
 
-The skill markdown files in `skills/` are standalone instruction sets. Copy them into your agent's context:
+### Skills (operational playbooks)
 
-| Skill file | What the agent learns |
-|------------|----------------------|
-| `skills/ingest/SKILL.md` | How to import meetings, docs, articles |
-| `skills/query/SKILL.md` | 3-layer search with synthesis and citations |
-| `skills/maintain/SKILL.md` | Periodic health: stale pages, orphans, dead links |
-| `skills/enrich/SKILL.md` | Enrich pages from external APIs |
-| `skills/briefing/SKILL.md` | Daily briefing with meeting prep |
-| `skills/migrate/SKILL.md` | Migrate from Obsidian, Notion, Logseq, etc. |
+These are standalone markdown instruction sets. Load them into your agent's context. Each one teaches the agent a complete workflow.
+
+| Skill | What the agent learns | Guide |
+|-------|----------------------|-------|
+| [ingest](skills/ingest/SKILL.md) | Import meetings, docs, articles. Rewrite compiled truth, append timeline, back-link all entities. | [Meeting Ingestion](docs/guides/meeting-ingestion.md) |
+| [query](skills/query/SKILL.md) | 3-layer search (keyword + vector + structured) with synthesis and citations. Never hallucinate. | [Search Modes](docs/guides/search-modes.md) |
+| [maintain](skills/maintain/SKILL.md) | Periodic health: stale compiled truth, orphan pages, dead links, tag inconsistency, missing embeddings. | [Operational Disciplines](docs/guides/operational-disciplines.md) |
+| [enrich](skills/enrich/SKILL.md) | Enrich pages from external APIs. Tiered spend (Tier 1: 10-15 calls, Tier 3: 1-2 calls). | [Enrichment Pipeline](docs/guides/enrichment-pipeline.md) |
+| [briefing](skills/briefing/SKILL.md) | Daily briefing: meetings with attendee context, active deals, time-sensitive threads. | [Executive Assistant](docs/guides/executive-assistant.md) |
+| [migrate](skills/migrate/SKILL.md) | Universal migration from Obsidian, Notion, Logseq, plain markdown, CSV, JSON, Roam. | — |
+| [setup](skills/setup/SKILL.md) | Set up GBrain from scratch: auto-provision Supabase, import, sync, verify. Target < 5 min. | — |
+
+### Integration recipes (self-installing senses)
+
+Run `gbrain integrations` to see available recipes. Your agent reads the recipe and walks you through setup.
+
+| Recipe | Category | What It Does | Guide |
+|--------|----------|-------------|-------|
+| [voice-to-brain](recipes/twilio-voice-brain.md) | Sense | Phone calls create brain pages via Twilio + OpenAI Realtime | [Getting Data In](docs/integrations/README.md) |
+
+More recipes shipping soon: email-to-brain, x-to-brain, calendar-to-brain, meeting-sync.
 
 #### As a TypeScript library
 
@@ -723,12 +781,22 @@ Initial embedding cost: ~$4-5 for 7,500 pages via OpenAI text-embedding-3-large.
 
 ## Docs
 
-- **[GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md)** -- **Start here for agents.** Reference architecture for production agents: brain-agent loop, entity detection, enrichment pipeline, meeting ingestion, cron schedule
-- [GBRAIN_RECOMMENDED_SCHEMA.md](docs/GBRAIN_RECOMMENDED_SCHEMA.md) -- The recommended brain schema: MECE directories, compiled truth + timeline, enrichment pipelines, resolver decision tree
-- [GBRAIN_V0.md](docs/GBRAIN_V0.md) -- Full product spec, all architecture decisions, every option considered
-- [ENGINES.md](docs/ENGINES.md) -- Pluggable engine interface, capability matrix, how to add backends
-- [SQLITE_ENGINE.md](docs/SQLITE_ENGINE.md) -- Complete SQLite engine plan with schema, FTS5, vector search options
-- [GBRAIN_VERIFY.md](docs/GBRAIN_VERIFY.md) -- Installation verification runbook: schema, live sync, embeddings, brain-first lookup
+**For agents:**
+- **[GBRAIN_SKILLPACK.md](docs/GBRAIN_SKILLPACK.md)** -- **Start here.** Index of all patterns, skills, and integrations
+- [Individual guides](docs/guides/) -- 17 standalone guides broken out from the skillpack
+- [Getting Data In](docs/integrations/README.md) -- Integration recipes, credential setup, data flow patterns
+- [GBRAIN_VERIFY.md](docs/GBRAIN_VERIFY.md) -- Installation verification runbook
+
+**For humans:**
+- [GBRAIN_RECOMMENDED_SCHEMA.md](docs/GBRAIN_RECOMMENDED_SCHEMA.md) -- Brain repo directory structure
+- [Infrastructure Layer](docs/architecture/infra-layer.md) -- How import, chunking, embedding, and search work
+- [Thin Harness, Fat Skills](docs/ethos/THIN_HARNESS_FAT_SKILLS.md) -- Architecture philosophy
+- [Homebrew for Personal AI](docs/ethos/MARKDOWN_SKILLS_AS_RECIPES.md) -- Why markdown is code
+
+**Reference:**
+- [GBRAIN_V0.md](docs/GBRAIN_V0.md) -- Full product spec, all architecture decisions
+- [ENGINES.md](docs/ENGINES.md) -- Pluggable engine interface, how to add backends
+- [SQLITE_ENGINE.md](docs/SQLITE_ENGINE.md) -- SQLite engine plan (community PRs welcome)
 
 ## Contributing
 
