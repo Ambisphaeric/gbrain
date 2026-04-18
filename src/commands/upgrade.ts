@@ -102,10 +102,27 @@ function saveUpgradeState(oldVersion: string, newVersion: string) {
 
 /**
  * Post-upgrade feature discovery. Reads migration files between old and new version,
- * prints feature pitches from YAML frontmatter. Called by `gbrain post-upgrade` which
- * runs the NEW binary after upgrade completes.
+ * prints the feature pitch headline AND the full migration body so the agent sees
+ * the step-by-step instructions, not just the marketing line. Called by
+ * `gbrain post-upgrade` which runs the NEW binary after upgrade completes.
+ *
+ * Flags:
+ *   --execute   Run commands listed in `auto_execute:` frontmatter (preview only
+ *               unless --yes is also passed).
+ *   --yes       Required with --execute. Skip per-command prompts and run all.
  */
-export function runPostUpgrade() {
+export function runPostUpgrade(args: string[] = []) {
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log('Usage: gbrain post-upgrade [--execute] [--yes]\n');
+    console.log('Print migration notes for versions between the last upgrade and now.');
+    console.log('With --execute, list the auto_execute commands the migration declares.');
+    console.log('With --execute --yes, actually run those commands sequentially.');
+    return;
+  }
+
+  const execute = args.includes('--execute');
+  const yes = args.includes('--yes');
+
   try {
     const statePath = join(process.env.HOME || '', '.gbrain', 'upgrade-state.json');
     if (!existsSync(statePath)) return;
@@ -123,23 +140,116 @@ export function runPostUpgrade() {
 
     for (const file of files) {
       const version = file.replace(/^v/, '').replace(/\.md$/, '');
-      if (isNewerThan(version, lastUpgrade.from)) {
-        const content = readFileSync(join(migrationsDir, file), 'utf-8');
-        const pitch = extractFeaturePitch(content);
-        if (pitch) {
+      if (!isNewerThan(version, lastUpgrade.from)) continue;
+
+      const content = readFileSync(join(migrationsDir, file), 'utf-8');
+      const pitch = extractFeaturePitch(content);
+      if (!pitch) continue;
+
+      console.log('');
+      console.log(`=== Migration v${version} ===`);
+      console.log(`NEW: ${pitch.headline}`);
+      if (pitch.description) console.log(pitch.description);
+      if (pitch.recipe) {
+        console.log(`Run \`gbrain integrations show ${pitch.recipe}\` to set it up.`);
+      }
+
+      const body = extractBody(content);
+      if (body) {
+        console.log('');
+        console.log('--- Migration steps ---');
+        console.log(body);
+      }
+      console.log('');
+
+      if (execute) {
+        const commands = extractAutoExecute(content);
+        if (commands.length === 0) {
+          console.log(`(v${version} declares no auto_execute commands — run the steps above manually.)`);
           console.log('');
-          console.log(`NEW: ${pitch.headline}`);
-          if (pitch.description) console.log(pitch.description);
-          if (pitch.recipe) {
-            console.log(`Run \`gbrain integrations show ${pitch.recipe}\` to set it up.`);
-          }
-          console.log('');
+          continue;
         }
+
+        console.log(`--- Auto-execute plan for v${version} (${commands.length} command(s)) ---`);
+        for (const c of commands) {
+          console.log(`  $ ${c.cmd}`);
+          if (c.description) console.log(`    ${c.description}`);
+        }
+        console.log('');
+
+        if (!yes) {
+          console.log('Re-run with --execute --yes to actually run these commands.');
+          console.log('');
+          continue;
+        }
+
+        for (const c of commands) {
+          console.log(`\n$ ${c.cmd}`);
+          try {
+            execSync(c.cmd, { stdio: 'inherit', timeout: 600_000 });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`Command failed: ${c.cmd}`);
+            console.error(msg);
+            console.error('Stopping execution. Re-run after fixing the issue.');
+            return;
+          }
+        }
+        console.log(`\nAll v${version} auto_execute commands completed.`);
       }
     }
   } catch {
     // post-upgrade is best-effort
   }
+}
+
+/** Extract everything after the closing `---` of YAML frontmatter. */
+function extractBody(content: string): string {
+  const match = content.match(/^---\n[\s\S]*?\n---\n/);
+  if (!match) return content.trim();
+  return content.slice(match[0].length).trim();
+}
+
+/**
+ * Parse `auto_execute:` list from frontmatter. Schema:
+ *   auto_execute:
+ *     - cmd: gbrain init
+ *       description: Apply schema migrations
+ *     - cmd: gbrain extract links --source db
+ *       description: Backfill typed links
+ *
+ * Hand-rolled parser (no yaml dep) — only supports the exact shape above.
+ */
+function extractAutoExecute(content: string): Array<{ cmd: string; description?: string }> {
+  const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!fmMatch) return [];
+  const lines = fmMatch[1].split('\n');
+
+  const startIdx = lines.findIndex(l => /^auto_execute:\s*$/.test(l));
+  if (startIdx === -1) return [];
+
+  const commands: Array<{ cmd: string; description?: string }> = [];
+  let current: { cmd?: string; description?: string } | null = null;
+
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length > 0 && !/^\s/.test(line)) break; // next top-level key
+
+    const cmdMatch = line.match(/^\s+-\s+cmd:\s*(.+?)\s*$/);
+    if (cmdMatch) {
+      if (current?.cmd) commands.push({ cmd: current.cmd, description: current.description });
+      current = { cmd: cmdMatch[1].replace(/^["']|["']$/g, '') };
+      continue;
+    }
+
+    const descMatch = line.match(/^\s+description:\s*(.+?)\s*$/);
+    if (descMatch && current) {
+      current.description = descMatch[1].replace(/^["']|["']$/g, '');
+    }
+  }
+
+  if (current?.cmd) commands.push({ cmd: current.cmd, description: current.description });
+  return commands;
 }
 
 function findMigrationsDir(): string | null {
@@ -166,11 +276,14 @@ function extractFeaturePitch(content: string): { headline: string; description?:
 
   const descMatch = fm.match(/description:\s*["']?(.+?)["']?\s*$/m);
   const recipeMatch = fm.match(/recipe:\s*["']?(.+?)["']?\s*$/m);
+  const recipe = recipeMatch?.[1];
+  // YAML `recipe: null` parses to literal "null" in this regex; treat as absent.
+  const recipeClean = recipe && recipe !== 'null' && recipe !== '~' ? recipe : undefined;
 
   return {
     headline: headlineMatch[1],
     description: descMatch?.[1],
-    recipe: recipeMatch?.[1],
+    recipe: recipeClean,
   };
 }
 
