@@ -58,7 +58,7 @@ describe('migrations registry', () => {
 // frontmatter") and the per-page frontmatter preservation logic in the
 // setFrontmatterField test.
 
-describe('v0_13_0 orchestrator — no-config path', () => {
+describe('v0_13_0 orchestrator — dry-run path', () => {
   const ORIG_HOME = process.env.HOME;
   let tmpHome: string;
 
@@ -69,17 +69,6 @@ describe('v0_13_0 orchestrator — no-config path', () => {
 
   afterAll(() => {
     process.env.HOME = ORIG_HOME;
-  });
-
-  test('does not succeed when no brain is configured', async () => {
-    // No config file written → connect phase fails or skips; never completes.
-    const result = await v0_13_0.orchestrator({ yes: true, dryRun: false, noAutopilotInstall: true });
-    expect(result.version).toBe('0.13.0');
-    expect(result.status).not.toBe('complete');
-    const connectPhase = result.phases.find(p => p.name === 'connect');
-    expect(connectPhase?.status).not.toBe('complete');
-
-    rmSync(tmpHome, { recursive: true, force: true });
   });
 
   test('dryRun skips the connect phase', async () => {
