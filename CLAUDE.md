@@ -328,6 +328,22 @@ done
 
 If any SHA differs from what's in the workflow files, update the pin and version comment.
 
+## PR descriptions cover the whole branch
+
+Pull request titles and bodies must describe **everything in the PR diff against the
+base branch**, not just the most recent commit you made. When you open or update a
+PR, walk the full commit range with `git log --oneline <base>..<head>` and write the
+body to cover all of it. Group by feature area (schema, code, tests, docs) — not
+chronologically by commit.
+
+This matters because reviewers read the PR body to understand what's shipping. If
+the body only covers your last commit, they miss everything else and can't review
+properly. A 7-commit PR with a body that describes commit 7 is worse than no body
+at all — it actively misleads.
+
+When in doubt, run `gh pr view <N> --json commits --jq '[.commits[].messageHeadline]'`
+to see what's actually in the PR before writing the body.
+
 ## Community PR wave process
 
 Never merge external PRs directly into master. Instead, use the "fix wave" workflow:
