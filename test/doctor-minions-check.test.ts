@@ -123,6 +123,27 @@ describe('gbrain doctor — half-migrated Minions detection', () => {
     }
   });
 
+  test('regression: fresh install with schema-applied DB but no prefs must NOT fail', () => {
+    // CI regression. `gbrain init` against Postgres applies schema v7 but
+    // doesn't write preferences.json (the migration orchestrator does that
+    // via apply-migrations). For that brief window, schema is v7 with no
+    // prefs — a valid state that must NOT trigger a FAIL check.
+    //
+    // This pins the bug that broke Tier 1 CI (mechanical.test.ts
+    // "gbrain doctor exits 0 on healthy DB"): the old "schema v7+ no
+    // preferences.json → FAIL" rule was too aggressive. Only a concrete
+    // "partial without complete" entry in completed.jsonl counts as
+    // half-migrated.
+    const result = run(['doctor', '--fast', '--json']);
+    const checks = JSON.parse(result.stdout).checks as Array<{ name: string; status: string }>;
+    // No check with `minions_config` or `minions_migration` should be in FAIL
+    for (const check of checks) {
+      if (check.name === 'minions_config' || check.name === 'minions_migration') {
+        expect(check.status).not.toBe('fail');
+      }
+    }
+  });
+
   test('filesystem: multiple versions each need their own complete entry', () => {
     // v0.10 is fully migrated but v0.11 is only partial. Doctor should
     // flag v0.11 by name.

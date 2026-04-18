@@ -2,7 +2,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import * as db from '../core/db.ts';
 import { LATEST_VERSION } from '../core/migrate.ts';
 import { checkResolvable } from '../core/check-resolvable.ts';
-import { loadCompletedMigrations, preferencesPaths } from '../core/preferences.ts';
+import { loadCompletedMigrations } from '../core/preferences.ts';
 import { join } from 'path';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 
@@ -167,18 +167,12 @@ export async function runDoctor(engine: BrainEngine | null, args: string[]) {
     checks.push({ name: 'schema_version', status: 'warn', message: 'Could not check schema version' });
   }
 
-  // 6a. Minions never configured: schema is v7+ (Minions present) but
-  // preferences.json is missing. This is the classic v0.11.0 mega-bug
-  // (upgrade landed, migration never fired). Fires even without a partial
-  // record in completed.jsonl — catches installs that never ran the
-  // stopgap either.
-  if (schemaVersion >= 7 && !existsSync(preferencesPaths.file())) {
-    checks.push({
-      name: 'minions_config',
-      status: 'fail',
-      message: 'MINIONS HALF-INSTALLED (schema v7+ but no ~/.gbrain/preferences.json). Run: gbrain apply-migrations --yes',
-    });
-  }
+  // Note: we intentionally DO NOT fail on "schema v7+ but no preferences.json".
+  // That's a valid fresh-install state after `gbrain init` — the migration
+  // orchestrator writes preferences, but `init` alone doesn't run it. The
+  // partial-completed.jsonl check in the filesystem section (step 3) is
+  // the canonical half-migration signal and fires when the stopgap ran
+  // but `apply-migrations` didn't follow up.
 
   // 7. Embedding health
   try {
