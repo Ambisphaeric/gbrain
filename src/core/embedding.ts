@@ -2,32 +2,86 @@
  * Embedding Service
  * Ported from production Ruby implementation (embedding_service.rb, 190 LOC)
  *
- * Supports HTTP provider (local MLX, Ollama, etc.) via GBRAIN_EMBED_HTTP_URL
- * Fallback: OpenAI text-embedding-3-large at 1536 dimensions.
+ * Supports local embedding servers (MLX, Ollama, etc.) via config/env:
+ *   - EMBEDDING_BASE_URL - Custom endpoint (e.g., http://192.168.1.217:8081/v1)
+ *   - EMBEDDING_MODEL - Model name (default: text-embedding-3-large)
+ *   - EMBEDDING_DIMENSIONS - Vector dimensions (default: 1536)
+ *
+ * OpenAI SDK is used for both local and cloud providers.
  * Retry with exponential backoff (4s base, 120s cap, 5 retries).
  * 8000 character input truncation.
  */
 
 import OpenAI from 'openai';
+import { loadConfig } from './config.ts';
 
-// HTTP provider configuration (env-based, zero breaking changes)
-const HTTP_URL = process.env.GBRAIN_EMBED_HTTP_URL;
-const HTTP_MODEL = process.env.GBRAIN_EMBED_HTTP_MODEL || 'text-embedding-3-large';
-const HTTP_DIMS = parseInt(process.env.GBRAIN_EMBED_HTTP_DIMS || '0', 10) || null;
-
-const MODEL = 'text-embedding-3-large';
-const DIMENSIONS = 1536;
+const DEFAULT_MODEL = 'text-embedding-3-large';
+const DEFAULT_DIMENSIONS = 1536;
 const MAX_CHARS = 8000;
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 4000;
 const MAX_DELAY_MS = 120000;
 const BATCH_SIZE = 100;
+const LOCAL_API_KEY_FALLBACK = '***'; // Local servers don't validate keys
 
 let client: OpenAI | null = null;
+let clientCacheKey: string | null = null;
 
-function getClient(): OpenAI {
-  if (!client) {
-    client = new OpenAI();
+export interface ResolvedEmbeddingConfig {
+  apiKey: string;
+  baseURL: string | undefined;
+  model: string;
+  dimensions: number;
+  isCustomBaseUrl: boolean;
+}
+
+function resolveConfig(): ResolvedEmbeddingConfig {
+  const brainConfig = loadConfig();
+
+  // Config precedence: env vars > config file > defaults
+  const baseURL = process.env.EMBEDDING_BASE_URL?.trim()
+    || brainConfig?.embedding_base_url?.trim()
+    || undefined;
+
+  const model = process.env.EMBEDDING_MODEL?.trim()
+    || brainConfig?.embedding_model?.trim()
+    || DEFAULT_MODEL;
+
+  const dimensions = parseInt(
+    process.env.EMBEDDING_DIMENSIONS
+    || brainConfig?.embedding_dimensions?.toString()
+    || String(DEFAULT_DIMENSIONS),
+    10
+  ) || DEFAULT_DIMENSIONS;
+
+  const isCustomBaseUrl = !!baseURL;
+
+  // Use dummy key for local servers, real key for OpenAI
+  const apiKey = brainConfig?.openai_api_key?.trim()
+    || process.env.OPENAI_API_KEY?.trim()
+    || (isCustomBaseUrl ? LOCAL_API_KEY_FALLBACK : '');
+
+  return {
+    apiKey,
+    baseURL,
+    model,
+    dimensions,
+    isCustomBaseUrl,
+  };
+}
+
+function getClient(config: ResolvedEmbeddingConfig): OpenAI {
+  const cacheKey = JSON.stringify({
+    baseURL: config.baseURL,
+    apiKey: config.apiKey,
+  });
+
+  if (!client || clientCacheKey !== cacheKey) {
+    client = new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.baseURL,
+    });
+    clientCacheKey = cacheKey;
   }
   return client;
 }
@@ -39,88 +93,36 @@ export async function embed(text: string): Promise<Float32Array> {
 }
 
 export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
-  // Use HTTP provider if configured (local MLX, Ollama, etc.)
-  if (HTTP_URL) {
-    return embedBatchHttp(texts);
-  }
-
+  const config = resolveConfig();
   const truncated = texts.map(t => t.slice(0, MAX_CHARS));
   const results: Float32Array[] = [];
 
   // Process in batches of BATCH_SIZE
   for (let i = 0; i < truncated.length; i += BATCH_SIZE) {
     const batch = truncated.slice(i, i + BATCH_SIZE);
-    const batchResults = await embedBatchWithRetry(batch);
+    const batchResults = await embedBatchWithRetry(batch, config);
     results.push(...batchResults);
   }
 
   return results;
 }
 
-// HTTP provider for local MLX embeddings (OpenAI-compatible API)
-async function embedBatchHttp(texts: string[]): Promise<Float32Array[]> {
-  const truncated = texts.map(t => t.slice(0, MAX_CHARS));
-  const results: Float32Array[] = [];
-
-  // Process in batches
-  for (let i = 0; i < truncated.length; i += BATCH_SIZE) {
-    const batch = truncated.slice(i, i + BATCH_SIZE);
-
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      try {
-        const response = await fetch(`${HTTP_URL}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: HTTP_MODEL,
-            input: batch,
-            ...(HTTP_DIMS ? { dimensions: HTTP_DIMS } : {}),
-          }),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`HTTP embedding failed (${response.status}): ${errorText}`);
-        }
-
-        const data = await response.json() as any;
-
-        // Handle OpenAI-compatible response format
-        if (data.data && Array.isArray(data.data)) {
-          const sorted = data.data.sort((a: any, b: any) => (a.index || 0) - (b.index || 0));
-          results.push(...sorted.map((d: any) => new Float32Array(d.embedding)));
-        } else if (Array.isArray(data.embeddings)) {
-          // Some local servers return { embeddings: [...] }
-          results.push(...data.embeddings.map((e: number[]) => new Float32Array(e)));
-        } else if (Array.isArray(data)) {
-          // Direct array response
-          results.push(...data.map((e: number[]) => new Float32Array(e)));
-        } else {
-          throw new Error(`Unexpected HTTP embedding response format: ${JSON.stringify(data).slice(0, 200)}`);
-        }
-
-        break; // Success, exit retry loop
-      } catch (e: unknown) {
-        if (attempt === MAX_RETRIES - 1) throw e;
-        const delay = exponentialDelay(attempt);
-        await sleep(delay);
-      }
-    }
-  }
-
-  return results;
-}
-
-async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
+async function embedBatchWithRetry(
+  texts: string[],
+  config: ResolvedEmbeddingConfig
+): Promise<Float32Array[]> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const response = await getClient().embeddings.create({
-        model: MODEL,
+      // Build request - omit dimensions for custom servers (they have fixed widths)
+      const request: { model: string; input: string[]; dimensions?: number } = {
+        model: config.model,
         input: texts,
-        dimensions: DIMENSIONS,
-      });
+      };
+      if (!config.isCustomBaseUrl) {
+        request.dimensions = config.dimensions;
+      }
+
+      const response = await getClient(config).embeddings.create(request);
 
       // Sort by index to maintain order
       const sorted = response.data.sort((a, b) => a.index - b.index);
@@ -128,16 +130,14 @@ async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
     } catch (e: unknown) {
       if (attempt === MAX_RETRIES - 1) throw e;
 
-      // Check for rate limit with Retry-After header
       let delay = exponentialDelay(attempt);
 
+      // Check for rate limit with Retry-After header (OpenAI-specific)
       if (e instanceof OpenAI.APIError && e.status === 429) {
         const retryAfter = e.headers?.['retry-after'];
         if (retryAfter) {
           const parsed = parseInt(retryAfter, 10);
-          if (!isNaN(parsed)) {
-            delay = parsed * 1000;
-          }
+          if (!isNaN(parsed)) delay = parsed * 1000;
         }
       }
 
@@ -145,7 +145,6 @@ async function embedBatchWithRetry(texts: string[]): Promise<Float32Array[]> {
     }
   }
 
-  // Should not reach here
   throw new Error('Embedding failed after all retries');
 }
 
@@ -158,4 +157,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export { MODEL as EMBEDDING_MODEL, DIMENSIONS as EMBEDDING_DIMENSIONS };
+// Exports for consumers
+export {
+  DEFAULT_MODEL as EMBEDDING_MODEL,
+  DEFAULT_DIMENSIONS as EMBEDDING_DIMENSIONS,
+  resolveConfig as resolveEmbeddingConfig,
+};
