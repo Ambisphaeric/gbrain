@@ -1,6 +1,7 @@
 /**
  * Audio transcription service.
  *
+ * HTTP provider (local MLX, etc.) via GBRAIN_TRANSCRIBE_HTTP_URL
  * Default provider: Groq Whisper (fast, cheap, OpenAI-compatible API format).
  * Fallback: OpenAI Whisper if Groq unavailable.
  * For files >25MB: ffmpeg segmentation into <25MB chunks, transcribe each, concatenate.
@@ -8,6 +9,10 @@
 
 import { statSync, readFileSync } from 'fs';
 import { basename, extname } from 'path';
+
+// HTTP provider configuration (env-based, zero breaking changes)
+const HTTP_URL = process.env.GBRAIN_TRANSCRIBE_HTTP_URL;
+const HTTP_MODEL = process.env.GBRAIN_TRANSCRIBE_HTTP_MODEL;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,7 +34,7 @@ export interface TranscriptionResult {
 }
 
 export interface TranscriptionConfig {
-  provider?: 'groq' | 'openai' | 'deepgram';
+  provider?: 'groq' | 'openai' | 'deepgram' | 'http';
   apiKey?: string;
   model?: string;
   language?: string;
@@ -48,7 +53,7 @@ const AUDIO_EXTENSIONS = new Set([
 // ---------------------------------------------------------------------------
 
 /**
- * Transcribe an audio file using Groq Whisper (default) or OpenAI Whisper.
+ * Transcribe an audio file using HTTP provider (if configured), Groq Whisper (default), or OpenAI Whisper.
  * Files >25MB are segmented with ffmpeg before transcription.
  */
 export async function transcribe(
@@ -60,6 +65,11 @@ export async function transcribe(
   const ext = extname(audioPath).toLowerCase();
   if (!AUDIO_EXTENSIONS.has(ext)) {
     throw new Error(`Unsupported audio format: ${ext}. Supported: ${[...AUDIO_EXTENSIONS].join(', ')}`);
+  }
+
+  // Use HTTP provider if configured (local MLX, etc.)
+  if (HTTP_URL || config.provider === 'http') {
+    return transcribeHttp(audioPath, stat.size, config);
   }
 
   // Determine provider and API key
@@ -80,6 +90,137 @@ export async function transcribe(
 
   // Single file transcription
   return transcribeFile(audioPath, provider, apiKey, config);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP provider (local MLX, etc.)
+// ---------------------------------------------------------------------------
+
+async function transcribeHttp(
+  audioPath: string,
+  fileSize: number,
+  config: TranscriptionConfig,
+): Promise<TranscriptionResult> {
+  const httpUrl = HTTP_URL!;
+  const model = HTTP_MODEL || config.model || 'whisper';
+
+  // Handle large files via segmentation (same pattern as Groq/OpenAI)
+  if (fileSize > MAX_FILE_SIZE) {
+    return transcribeLargeFileHttp(audioPath, httpUrl, model, config);
+  }
+
+  const result = await transcribeFileHttp(audioPath, httpUrl, model, config);
+  return { ...result, provider: 'http' };
+}
+
+async function transcribeFileHttp(
+  audioPath: string,
+  httpUrl: string,
+  model: string,
+  config: TranscriptionConfig,
+): Promise<TranscriptionResult> {
+  const fileData = readFileSync(audioPath);
+  const formData = new FormData();
+  formData.append('file', new Blob([fileData]), basename(audioPath));
+  formData.append('model', model);
+  formData.append('response_format', 'verbose_json');
+  if (config.language) formData.append('language', config.language);
+
+  const response = await fetch(`${httpUrl.replace(/\/$/, '')}/audio/transcriptions`, {
+    method: 'POST',
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`HTTP transcription failed (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json() as any;
+
+  return {
+    text: data.text || '',
+    segments: (data.segments || []).map((s: any) => ({
+      start: s.start || 0,
+      end: s.end || 0,
+      text: s.text || '',
+    })),
+    language: data.language || config.language || 'unknown',
+    duration: data.duration || 0,
+    provider: 'http',
+  };
+}
+
+async function transcribeLargeFileHttp(
+  audioPath: string,
+  httpUrl: string,
+  model: string,
+  config: TranscriptionConfig,
+): Promise<TranscriptionResult> {
+  // Check ffmpeg availability
+  const ffmpegAvailable = await checkFfmpeg();
+  if (!ffmpegAvailable) {
+    throw new Error(
+      'File exceeds 25MB and ffmpeg is required for segmentation. ' +
+      'Install ffmpeg: brew install ffmpeg (macOS) or apt install ffmpeg (Linux)'
+    );
+  }
+
+  // Segment into ~20MB chunks (with some overlap for better joining)
+  const { execSync } = await import('child_process');
+  const tmpDir = execSync('mktemp -d').toString().trim();
+
+  try {
+    // Get audio duration
+    const durationStr = execSync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`,
+      { encoding: 'utf-8' }
+    ).trim();
+    const totalDuration = parseFloat(durationStr) || 0;
+
+    // Calculate segment length (~20MB per segment, estimate from file size)
+    const stat = statSync(audioPath);
+    const bytesPerSecond = stat.size / Math.max(totalDuration, 1);
+    const segmentSeconds = Math.floor((20 * 1024 * 1024) / bytesPerSecond);
+
+    // Split audio
+    const ext = extname(audioPath);
+    execSync(
+      `ffmpeg -i "${audioPath}" -f segment -segment_time ${segmentSeconds} -c copy "${tmpDir}/segment_%03d${ext}"`,
+      { stdio: 'pipe' }
+    );
+
+    // Transcribe each segment
+    const { readdirSync } = await import('fs');
+    const segments = readdirSync(tmpDir).filter(f => f.startsWith('segment_')).sort();
+    const results: TranscriptionResult[] = [];
+    let timeOffset = 0;
+
+    for (const seg of segments) {
+      const segPath = `${tmpDir}/${seg}`;
+      const result = await transcribeFileHttp(segPath, httpUrl, model, config);
+      // Offset timestamps
+      result.segments = result.segments.map(s => ({
+        ...s,
+        start: s.start + timeOffset,
+        end: s.end + timeOffset,
+      }));
+      results.push(result);
+      timeOffset += result.duration;
+    }
+
+    // Concatenate results
+    return {
+      text: results.map(r => r.text).join(' '),
+      segments: results.flatMap(r => r.segments),
+      language: results[0]?.language || 'unknown',
+      duration: timeOffset,
+      provider: 'http',
+    };
+  } finally {
+    // Cleanup temp directory
+    try { execSync(`rm -rf "${tmpDir}"`); } catch {}
+  }
 }
 
 // ---------------------------------------------------------------------------
