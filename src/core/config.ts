@@ -13,6 +13,13 @@ export interface GBrainConfig {
   database_path?: string;
   openai_api_key?: string;
   anthropic_api_key?: string;
+  // Embedding configuration
+  embedding_base_url?: string;
+  embedding_model?: string;
+  embedding_dimensions?: number;
+  // Transcription configuration
+  transcribe_base_url?: string;
+  transcribe_model?: string;
 }
 
 /**
